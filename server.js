@@ -290,9 +290,12 @@ app.get('/api/diplomas', authenticate, (req, res) => {
     });
   }
 
+  // Pour la démo : Seul le compte Da Firmin (usr_da_firmin) a des diplômes
+  const userDiplomas = req.auth.sub === 'usr_da_firmin' ? diplomas : [];
+
   return res.json({
     success: true,
-    data: diplomas,
+    data: userDiplomas,
   });
 });
 

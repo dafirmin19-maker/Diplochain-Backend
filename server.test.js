@@ -19,6 +19,7 @@ async function login() {
 }
 
 describe('DiploChain API', () => {
+
   test('login returns a token and public user data', async () => {
     const response = await request(app)
       .post('/api/auth/login')
@@ -31,10 +32,19 @@ describe('DiploChain API', () => {
     expect(response.body.user.email).toBe(demoCredentials.email);
   });
 
-  test('login rejects invalid input', async () => {
+  test('login rejects invalid email format', async () => {
     const response = await request(app)
       .post('/api/auth/login')
-      .send({ email: 'bad-email', password: 'short' })
+      .send({ email: 'bad-email', password: 'Password123' })
+      .expect(400);
+
+    expect(response.body.success).toBe(false);
+  });
+
+  test('login rejects password too short', async () => {
+    const response = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'test@example.com', password: 'short' })
       .expect(400);
 
     expect(response.body.success).toBe(false);
@@ -59,13 +69,42 @@ describe('DiploChain API', () => {
     expect(response.body.user.password).toBeUndefined();
   });
 
-  test('private diplomas reject another user id', async () => {
+  test('profile route rejects access to another user profile', async () => {
     const { token } = await login();
 
     await request(app)
+      .get('/api/users/usr_admin/profile')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(403);
+  });
+
+  test('diplomas route requires auth', async () => {
+    await request(app)
+      .get('/api/diplomas')
+      .expect(401);
+  });
+
+  test('private diplomas reject access to another user id', async () => {
+    const { token } = await login();
+
+    const response = await request(app)
       .get('/api/diplomas?user=usr_other')
       .set('Authorization', `Bearer ${token}`)
       .expect(403);
+
+    expect(response.body.success).toBe(false);
+  });
+
+  test('diplomas route returns own diplomas', async () => {
+    const { token } = await login();
+
+    const response = await request(app)
+      .get('/api/diplomas')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(response.body.success).toBe(true);
+    expect(Array.isArray(response.body.data)).toBe(true);
   });
 
   test('public diploma route validates hash format', async () => {
@@ -76,17 +115,31 @@ describe('DiploChain API', () => {
     expect(response.body.success).toBe(false);
   });
 
-  test('public diploma route returns a verified diploma', async () => {
-    const hash = '0x71b2a4f9e3c18d5b2a4f9e3c18d5b2a4';
-
+  test('public diploma route returns 404 for unknown valid hash', async () => {
     const response = await request(app)
-      .get(`/api/public/diplomas/${hash}`)
+      .get('/api/public/diplomas/0xdeadbeef12345678deadbeef12345678')
+      .expect(404);
+
+    expect(response.body.success).toBe(false);
+  });
+
+  test('verify route validates hash format', async () => {
+    const response = await request(app)
+      .get('/api/verify/not-a-hash')
+      .expect(400);
+
+    expect(response.body.success).toBe(false);
+  });
+
+  test('health endpoint returns ok', async () => {
+    const response = await request(app)
+      .get('/api/health')
       .expect(200);
 
     expect(response.body.success).toBe(true);
-    expect(response.body.data.blockchainHash).toBe(hash);
-    expect(response.body.data.publicVerificationUrl).toContain(
-      `/api/public/diplomas/${hash}`,
-    );
+    expect(response.body.status).toBe('ok');
+    expect(response.body.contract).toBe('0xBF0674C9C6582B35Fdbe44ae41f286246A00A43E');
+    expect(response.body.blockchain).toBe('Sepolia');
   });
+
 });

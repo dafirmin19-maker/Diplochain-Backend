@@ -34,7 +34,6 @@ app.use(express.json());
 // ─── STOCKAGE EN MÉMOIRE ─────────────────────────────────────────────────────
 let diplomas = [];
 
-// Utilisateurs en mémoire (remplacer par DB en production)
 let users = [
   {
     id: 'usr_admin',
@@ -59,17 +58,13 @@ let users = [
 ];
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ─── MIDDLEWARE AUTH ──────────────────────────────────────────────────────────
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ success: false, error: 'Token manquant' });
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ success: false, error: 'Token invalide' });
-    req.user = user;
-    next();
-  });
+function isValidBlockchainHash(hash) {
+  return /^0x[0-9a-fA-F]{16,64}$/.test(hash);
 }
 
 function formatUser(user) {
@@ -83,13 +78,30 @@ function formatUser(user) {
     createdAt: user.createdAt,
   };
 }
+
+function getBaseUrl(req) {
+  return `${req.protocol}://${req.get('host')}`;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── MIDDLEWARE AUTH ──────────────────────────────────────────────────────────
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ success: false, error: 'Token manquant' });
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ success: false, error: 'Token invalide' });
+    req.user = user;
+    next();
+  });
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── ROUTE RACINE ────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ message: 'DiploChain API is running', version: '2.0' });
 });
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─── ROUTES AUTH ─────────────────────────────────────────────────────────────
 
@@ -99,6 +111,12 @@ app.post('/api/auth/login', (req, res) => {
 
   if (!email || !password) {
     return res.status(400).json({ success: false, error: 'Email et mot de passe requis.' });
+  }
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ success: false, error: 'Adresse email invalide.' });
+  }
+  if (!password || password.length < 8) {
+    return res.status(400).json({ success: false, error: 'Mot de passe invalide (min. 8 caractères).' });
   }
 
   const user = users.find(
@@ -124,6 +142,9 @@ app.post('/api/auth/register', (req, res) => {
 
   if (!fullName || !email || !password) {
     return res.status(400).json({ success: false, error: 'Nom, email et mot de passe requis.' });
+  }
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ success: false, error: 'Adresse email invalide.' });
   }
 
   const exists = users.find(u => u.email.toLowerCase() === email.toLowerCase().trim());
@@ -151,7 +172,6 @@ app.post('/api/auth/register', (req, res) => {
   );
 
   console.log(`✅ Nouvel utilisateur : ${newUser.fullName} (${newUser.email})`);
-
   res.status(201).json({ success: true, token, user: formatUser(newUser) });
 });
 
@@ -163,15 +183,34 @@ app.get('/api/auth/me', authenticateToken, (req, res) => {
 });
 
 app.get('/api/users/:id/profile', authenticateToken, (req, res) => {
+  // Un utilisateur ne peut accéder qu'à son propre profil (sauf admin)
+  if (req.user.id !== req.params.id && req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Accès interdit.' });
+  }
   const user = users.find(u => u.id === req.params.id);
   if (!user) return res.status(404).json({ success: false, error: 'Utilisateur non trouvé' });
   res.json({ success: true, user: formatUser(user) });
 });
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─── ROUTES DIPLÔMES ─────────────────────────────────────────────────────────
+
+// Liste des diplômes — filtrée par userId, vérification d'autorisation
 app.get('/api/diplomas', authenticateToken, (req, res) => {
-  res.json({ success: true, diplomas, total: diplomas.length });
+  const requestedUserId = req.query.user;
+
+  // Si un userId est spécifié, vérifier que c'est le sien (ou admin)
+  if (requestedUserId && requestedUserId !== req.user.id && req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Accès interdit.' });
+  }
+
+  const userId = requestedUserId || req.user.id;
+  const filtered = diplomas.filter(d => {
+    // Filtrer par studentId si disponible, sinon retourner tous pour l'utilisateur connecté
+    if (d.userId) return d.userId === userId;
+    return true;
+  });
+
+  res.json({ success: true, data: filtered, total: filtered.length });
 });
 
 app.get('/api/diplomas/:id', authenticateToken, (req, res) => {
@@ -180,18 +219,43 @@ app.get('/api/diplomas/:id', authenticateToken, (req, res) => {
   res.json({ success: true, diploma });
 });
 
+// Vérification par hash
 app.get('/api/verify/:hash', (req, res) => {
-  const diploma = diplomas.find(d => d.blockchainHash === req.params.hash);
-  if (!diploma) return res.status(404).json({ verified: false, error: 'Diplôme non trouvé' });
-  res.json({ verified: true, diploma });
+  const { hash } = req.params;
+  if (!isValidBlockchainHash(hash)) {
+    return res.status(400).json({ success: false, error: 'Format de hash invalide.' });
+  }
+  const diploma = diplomas.find(d => d.blockchainHash === hash);
+  if (!diploma) return res.status(404).json({ success: false, error: 'Diplôme non trouvé' });
+
+  const publicVerificationUrl = `${req.protocol}://${req.get('host')}/api/public/diplomas/${encodeURIComponent(hash)}`;
+  res.json({
+    success: true,
+    isVerified: true,
+    data: { ...diploma, status: 'AUTHENTIQUE', publicVerificationUrl },
+  });
 });
 
+// Route publique — validation hash + réponse normalisée
 app.get('/api/public/diplomas/:hash', (req, res) => {
-  const diploma = diplomas.find(d => d.blockchainHash === req.params.hash);
-  if (!diploma) return res.status(404).json({ verified: false, error: 'Diplôme non trouvé' });
-  res.json({ verified: true, diploma });
+  const { hash } = req.params;
+
+  if (!isValidBlockchainHash(hash)) {
+    return res.status(400).json({ success: false, error: 'Format de hash invalide.' });
+  }
+
+  const diploma = diplomas.find(d => d.blockchainHash === hash);
+  if (!diploma) return res.status(404).json({ success: false, error: 'Diplôme non trouvé' });
+
+  const publicVerificationUrl = `${req.protocol}://${req.get('host')}/api/public/diplomas/${encodeURIComponent(hash)}`;
+  res.json({
+    success: true,
+    data: {
+      ...diploma,
+      publicVerificationUrl,
+    },
+  });
 });
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─── ROUTE SANTÉ ─────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
@@ -204,7 +268,6 @@ app.get('/api/health', (req, res) => {
     contract: CONTRACT_ADDRESS,
   });
 });
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─── ÉCOUTE BLOCKCHAIN ───────────────────────────────────────────────────────
 async function startBlockchainListener() {
@@ -223,6 +286,7 @@ async function startBlockchainListener() {
       const newDiploma = {
         id: `diploma_${Date.now()}`,
         title: degreeName,
+        university: 'Blockchain Sepolia',
         studentName,
         degreeName,
         issuedBy,
@@ -249,6 +313,7 @@ async function startBlockchainListener() {
         diplomas.push({
           id: `diploma_${event.transactionHash}_${event.logIndex}`,
           title: degreeName,
+          university: 'Blockchain Sepolia',
           studentName,
           degreeName,
           issuedBy,
@@ -268,7 +333,6 @@ async function startBlockchainListener() {
     console.log('⚠️  Le serveur continue sans écoute blockchain.');
   }
 }
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─── KEEP-ALIVE RENDER ───────────────────────────────────────────────────────
 function startKeepAlive() {
@@ -281,11 +345,17 @@ function startKeepAlive() {
   }, 14 * 60 * 1000);
   console.log('🏓 Keep-alive démarré (ping toutes les 14 min)');
 }
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─── DÉMARRAGE ────────────────────────────────────────────────────────────────
-app.listen(PORT, async () => {
-  console.log(`🚀 Serveur démarré sur le port ${PORT}`);
-  await startBlockchainListener();
-  startKeepAlive();
-});
+if (require.main === module) {
+  app.listen(PORT, async () => {
+    console.log(`🚀 Serveur démarré sur le port ${PORT}`);
+    await startBlockchainListener();
+    startKeepAlive();
+  });
+} else {
+  // Mode test : démarrer la blockchain en arrière-plan sans bloquer
+  startBlockchainListener().catch(() => {});
+}
+
+module.exports = app;
